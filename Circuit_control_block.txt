@@ -1,0 +1,151 @@
+(*
+Modular PLC Program for Condensing Unit and Walk-In Freezer
+Overview:
+This program separates logic into meaningful blocks for a refrigeration system.
+Key subsystems include:
+1. Condensing Unit (Compressor, Condenser Fans, Pumpdown, LLSV)
+2. Walk-In Freezer (Evaporator Fans, Defrost, Door Control, Temperature Control)
+3. System Coordination and Alarms
+*)
+
+(* Condensing Unit Control *)
+FUNCTION_BLOCK CompressorControl
+VAR_INPUT
+    Enable: BOOL;                 (* Enables compressor operation *)
+    LPS: BOOL;                    (* Low-pressure switch input *)
+    HPS: BOOL;                    (* High-pressure switch input *)
+    MinRunTime: TIME;             (* Minimum runtime for compressor *)
+    MinStopTime: TIME;            (* Minimum stop time before restart *)
+END_VAR
+VAR_OUTPUT
+    CompressorOn: BOOL;           (* Output to activate the compressor *)
+END_VAR
+VAR
+    RunTimer: TIME;               (* Timer to track the duration the compressor has been running *)
+    StopTimer: TIME;              (* Timer to track the duration the compressor has been stopped *)
+    StartAllowed: BOOL;           (* Flag to indicate if the compressor is allowed to start *)
+END_VAR
+
+(* If the system is not enabled, ensure the compressor is off and reset timers and flags to prevent unexpected starts *)
+IF NOT Enable THEN
+    CompressorOn := FALSE;
+    RunTimer := T#0s;
+    StopTimer := T#0s;
+    StartAllowed := FALSE;
+    RETURN;
+END_IF;
+
+(* Allow compressor start only after minimum stop time has elapsed *)
+IF NOT CompressorOn THEN
+    StopTimer := StopTimer + T#1s;
+    IF StopTimer >= MinStopTime THEN
+        StartAllowed := TRUE;
+    END_IF;
+ELSE
+    StopTimer := T#0s;  (* Reset stop timer when compressor is running *)
+END_IF;
+
+(* Compressor operation depends on the following conditions:
+   - The compressor is allowed to start (StartAllowed is TRUE)
+   - The low-pressure switch (LPS) is not triggered (LPS is FALSE)
+   - The high-pressure switch (HPS) is not triggered (HPS is FALSE)
+   If these conditions are met, the compressor will run and the runtime timer will increment.
+   If any of these conditions are not met, the compressor will stop and the runtime timer will reset. *)
+IF StartAllowed AND NOT LPS AND NOT HPS THEN
+    CompressorOn := TRUE;
+    RunTimer := RunTimer + T#1s;  (* Increment runtime timer while running *)
+ELSE
+    CompressorOn := FALSE;
+    RunTimer := T#0s;  (* Ensure runtime timer is reset if compressor stops unexpectedly *)
+END_IF;
+
+(* Ensure the compressor runs for at least the minimum runtime before stopping *)
+IF CompressorOn AND (RunTimer < MinRunTime) THEN
+    CompressorOn := TRUE;         (* Enforce minimum runtime *)
+ELSE IF NOT CompressorOn THEN
+    RunTimer := T#0s;            (* Reset runtime timer when compressor is off *)
+END_IF;
+END_FUNCTION_BLOCK
+
+(* Condenser Fan Control *)
+FUNCTION_BLOCK CondenserFanControl
+VAR_INPUT
+    HeadPressure: REAL;           (* Current head pressure *)
+    PressureThresholds: ARRAY[1..4] OF REAL; (* Pressure thresholds for each fan *)
+END_VAR
+VAR_OUTPUT
+    FanStates: ARRAY[1..4] OF BOOL; (* States for each condenser fan *)
+END_VAR
+VAR
+    i: INT;                       (* Loop variable for iterating through fans *)
+END_VAR
+
+(* Loop through each fan and control its state based on head pressure thresholds *)
+FOR i := 1 TO 4 DO
+    IF HeadPressure >= PressureThresholds[i] THEN
+        FanStates[i] := TRUE;     (* Turn on the fan if the head pressure exceeds its threshold *)
+    ELSE
+        FanStates[i] := FALSE;    (* Turn off the fan if the head pressure is below its threshold *)
+    END_IF;
+END_FOR;
+END_FUNCTION_BLOCK
+
+(* Defrost Control *)
+FUNCTION_BLOCK DefrostControl
+VAR_INPUT
+    Enable: BOOL;                 (* Enables defrost operation *)
+    CoilTemp: REAL;               (* Coil temperature input *)
+    DefrostTemp: REAL;            (* Coil temperature to terminate defrost *)
+    DefrostTimeout: TIME;         (* Maximum defrost time allowed *)
+END_VAR
+VAR_OUTPUT
+    DefrostActive: BOOL;          (* Output to activate defrost heaters *)
+END_VAR
+VAR
+    DefrostTimer: TIME;           (* Timer for tracking defrost duration *)
+END_VAR
+
+(* If defrost is not enabled, ensure defrost is inactive and reset the timer *)
+IF NOT Enable THEN
+    DefrostActive := FALSE;
+    DefrostTimer := T#0s;
+    RETURN;
+END_IF;
+
+(* Activate defrost when the coil temperature is below the defrost threshold *)
+IF CoilTemp <= DefrostTemp THEN
+    DefrostActive := TRUE;
+    DefrostTimer := DefrostTimer + T#1s;  (* Increment defrost timer while active *)
+END_IF;
+
+(* Terminate defrost when the coil temperature exceeds the threshold or timeout is reached *)
+IF DefrostTimer >= DefrostTimeout OR CoilTemp > DefrostTemp THEN
+    DefrostActive := FALSE;
+    DefrostTimer := T#0s;  (* Reset defrost timer when defrost ends *)
+END_IF;
+END_FUNCTION_BLOCK
+
+(* System Coordinator *)
+FUNCTION_BLOCK MasterController
+VAR_INPUT
+    CompressorStatus: BOOL;       (* Compressor state from CompressorControl *)
+    FanStatus: ARRAY[1..4] OF BOOL; (* Condenser fan states *)
+    DefrostStatus: BOOL;          (* Defrost state from DefrostControl *)
+    FreezerTemp: REAL;            (* Current freezer temperature *)
+    Setpoint: REAL;               (* Desired freezer temperature *)
+END_VAR
+VAR_OUTPUT
+    SystemHealthy: BOOL;          (* Indicates if the system is operating normally *)
+    Alarm: BOOL;                  (* General alarm output for abnormal conditions *)
+END_VAR
+
+(* Determine if the system is operating normally based on compressor and defrost status *)
+SystemHealthy := CompressorStatus AND (NOT DefrostStatus);
+
+(* Trigger an alarm if the freezer temperature deviates significantly from the setpoint *)
+IF FreezerTemp > (Setpoint + 5.0) OR FreezerTemp < (Setpoint - 5.0) THEN
+    Alarm := TRUE;
+ELSE
+    Alarm := FALSE;
+END_IF;
+END_FUNCTION_BLOCK
