@@ -1,0 +1,120 @@
+(* Advanced Condenser Control with Proportional Fan Control, Anti-Short-Cycling Logic, Sensor Banding, OAT Fallback, and Enhanced Fan Management *)
+FUNCTION_BLOCK AdvancedCondenserControl
+VAR_INPUT
+    HeadPressure: REAL;                       (* Current head pressure *)
+    OAT: REAL;                                (* Outside air temperature (ambient) *)
+    SaturatedTemp: REAL;                      (* Saturated temperature based on discharge pressure *)
+    MaxRuntime: TIME;                         (* Maximum runtime before rotation *)
+    MinOffTime: TIME;                         (* Minimum off time to prevent short cycling *)
+    MinCondPressure: REAL;                    (* Minimum allowable condenser pressure *)
+    MaxCondPressure: REAL;                    (* Maximum allowable condenser pressure *)
+    SensorBand: REAL;                         (* Allowable fluctuation range for sensor readings *)
+END_VAR
+VAR_OUTPUT
+    FanGroupStates: ARRAY[1..4] OF BOOL;      (* States for each fan group *)
+    FanDemand: REAL;                          (* Proportional fan demand, ranging 0-4 for fan groups *)
+END_VAR
+VAR
+    FilteredHeadPressure: REAL;               (* Filtered head pressure to prevent fluctuations *)
+    FilteredOAT: REAL;                        (* Filtered outside air temperature *)
+    FilteredSaturatedTemp: REAL;              (* Filtered saturated temperature *)
+    FanRuntimes: ARRAY[1..6] OF TIME;         (* Runtime for each fan *)
+    FanOffTimes: ARRAY[1..6] OF TIME;         (* Off times for each fan *)
+    FanQueue: ARRAY[1..6] OF INT;             (* FIFO queue for fan rotation *)
+    TempDifference: REAL;                     (* Difference between OAT and SaturatedTemp *)
+    ProportionalDemand: REAL;                 (* Proportional demand based on TempDifference *)
+    RuntimeThreshold: TIME;                   (* Runtime threshold for fan rotation *)
+    ActiveFans: INT;                          (* Number of fully activated fan groups *)
+    PartialFanGroup: REAL;                    (* Partial fan activation within a group *)
+    OATSensorFailed: BOOL;                    (* Flag for OAT sensor failure *)
+    i, j, Temp: INT;                          (* Loop variables and temporary storage *)
+END_VAR
+
+(* Apply Sensor Banding to Filter Input Values *)
+FilteredHeadPressure := HeadPressure;         (* Initialize filtered value *)
+IF ABS(FilteredHeadPressure - HeadPressure) > SensorBand THEN
+    FilteredHeadPressure := HeadPressure;     (* Update if outside the band *)
+END_IF;
+
+FilteredOAT := OAT;                           (* Initialize filtered value *)
+IF ABS(FilteredOAT - OAT) > SensorBand THEN
+    FilteredOAT := OAT;                       (* Update if outside the band *)
+END_IF;
+
+FilteredSaturatedTemp := SaturatedTemp;       (* Initialize filtered value *)
+IF ABS(FilteredSaturatedTemp - SaturatedTemp) > SensorBand THEN
+    FilteredSaturatedTemp := SaturatedTemp;   (* Update if outside the band *)
+END_IF;
+
+(* Detect OAT Sensor Failure *)
+IF OAT < -20.0 OR OAT > 110.0 THEN
+    OATSensorFailed := TRUE;                  (* Set failure flag if OAT is out of expected range *)
+ELSE
+    OATSensorFailed := FALSE;                 (* Clear failure flag otherwise *)
+END_IF;
+
+(* Calculate Temperature Difference or Fallback to Pressure Control *)
+IF OATSensorFailed THEN
+    ProportionalDemand := (FilteredHeadPressure - MinCondPressure) / (MaxCondPressure - MinCondPressure) * 4.0; (* Use pressure control if OAT sensor fails *)
+    IF ProportionalDemand > 4.0 THEN
+        ProportionalDemand := 4.0;
+    ELSIF ProportionalDemand < 0.0 THEN
+        ProportionalDemand := 0.0;
+    END_IF;
+ELSE
+    TempDifference := FilteredSaturatedTemp - FilteredOAT;
+
+    (* Override Demand to Run All Fans if Extreme Conditions *)
+    IF FilteredOAT > 90.0 OR TempDifference > 30.0 THEN
+        ProportionalDemand := 4.0;            (* Force maximum demand *)
+    ELSE
+        (* Calculate Proportional Fan Demand Based on Temperature Difference *)
+        ProportionalDemand := TempDifference / 10.0;  (* Scale TempDifference to a proportional demand *)
+        IF ProportionalDemand > 4.0 THEN
+            ProportionalDemand := 4.0;        (* Cap demand at the maximum number of fan groups *)
+        ELSIF ProportionalDemand < 0.0 THEN
+            ProportionalDemand := 0.0;        (* Ensure demand does not fall below zero *)
+        END_IF;
+    END_IF;
+END_IF;
+
+FanDemand := ProportionalDemand;              (* Set the output for monitoring purposes *)
+
+(* Ensure FilteredHeadPressure is within Min/Max Condenser Pressure *)
+IF FilteredHeadPressure < MinCondPressure THEN
+    ProportionalDemand := 0.0;                (* Stop fans if pressure is too low *)
+ELSIF FilteredHeadPressure > MaxCondPressure THEN
+    ProportionalDemand := 4.0;                (* Run all fans if pressure is too high *)
+END_IF;
+
+(* Initialize FIFO Queue if Unused *)
+IF FanQueue[1] = 0 THEN
+    FOR i := 1 TO 6 DO
+        FanQueue[i] := i;                     (* Assign initial fan order *)
+    END_FOR;
+END_IF;
+
+(* Rotate Fans Based on Runtime First *)
+FOR i := 1 TO 6 DO
+    FOR j := i + 1 TO 6 DO
+        IF FanRuntimes[FanQueue[i]] > FanRuntimes[FanQueue[j]] THEN
+            Temp := FanQueue[i];
+            FanQueue[i] := FanQueue[j];
+            FanQueue[j] := Temp;             (* Reorder queue based on runtime *)
+        END_IF;
+    END_FOR;
+END_FOR;
+
+(* Activate Fans with Least Runtime First *)
+FOR i := 1 TO ActiveFans DO
+    FanGroupStates[FanQueue[i]] := TRUE;      (* Activate fans with least runtime *)
+    FanRuntimes[FanQueue[i]] := FanRuntimes[FanQueue[i]] + T#1s; (* Increment runtime for active fans *)
+END_FOR;
+
+(* Deactivate Remaining Fans Using FIFO Logic *)
+FOR i := ActiveFans + 1 TO 6 DO
+    FanGroupStates[FanQueue[i]] := FALSE;     (* Deactivate fans outside demand *)
+    FanOffTimes[FanQueue[i]] := FanOffTimes[FanQueue[i]] + T#1s; (* Increment off time for inactive fans *)
+END_FOR;
+
+END_FUNCTION_BLOCK
