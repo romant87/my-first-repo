@@ -1,0 +1,127 @@
+(* Compressor Control State Machine *)
+FUNCTION_BLOCK CompressorControl
+VAR_INPUT
+    Enable: BOOL;                     (* Enables compressor operation *)
+    LPS: BOOL;                        (* Low-pressure switch input *)
+    HPS: BOOL;                        (* High-pressure switch input *)
+    Alarm: BOOL;                      (* Alarm condition input *)
+    ManualMode: BOOL;                 (* Manual mode override input *)
+    PumpdownTrigger: BOOL;            (* Trigger to initiate pumpdown *)
+    MinRunTime: TIME;                 (* Minimum runtime for compressor *)
+    MinStopTime: TIME;                (* Minimum stop time before restart *)
+    SafetyTimer: TIME;                (* Safety timer to ensure system stability *)
+END_VAR
+
+VAR_OUTPUT
+    CompressorOn: BOOL;               (* Output to activate the compressor *)
+END_VAR
+
+VAR
+    State: INT;                       (* Current state of the compressor *)
+    RunTimer: TIME;                   (* Timer to track compressor runtime *)
+    StopTimer: TIME;                  (* Timer to track compressor stop duration *)
+    SafetyTimerCounter: TIME;         (* Timer for safety operations *)
+END_VAR
+
+(* State Definitions *)
+CONST
+    COMP_OFF : INT := 0;              (* Compressor is off *)
+    COMP_STARTS : INT := 1;           (* Compressor starts *)
+    COMP_RUNS : INT := 2;             (* Compressor is running *)
+    COMP_FORCED_OFF : INT := 3;       (* Compressor is forced off due to external conditions *)
+    COMP_OFF_BY_ALARM : INT := 4;     (* Compressor is off due to an alarm *)
+    COMP_OFF_BY_SAFETY_TIMER : INT := 5; (* Compressor is off due to safety timer *)
+    COMP_ON_BY_SAFETY_TIMER : INT := 6;  (* Compressor is turned on by safety timer *)
+    MANUAL_MODE : INT := 7;           (* Compressor is in manual mode *)
+    PUMPDOWN : INT := 8;              (* Compressor is performing pumpdown *)
+END_CONST;
+
+(* State Machine Logic *)
+CASE State OF
+
+    (* COMP_OFF: Compressor is off and waiting for conditions to enable *)
+    COMP_OFF:
+        CompressorOn := FALSE;
+        StopTimer := StopTimer + T#1s;
+
+        (* Transition conditions *)
+        IF ManualMode THEN
+            State := MANUAL_MODE;
+        ELSIF Alarm THEN
+            State := COMP_OFF_BY_ALARM;
+        ELSIF PumpdownTrigger THEN
+            State := PUMPDOWN;
+        ELSIF Enable AND (StopTimer >= MinStopTime) THEN
+            State := COMP_STARTS;
+        END_IF;
+
+    (* COMP_STARTS: Compressor is starting, bypass low-pressure switch if necessary *)
+    COMP_STARTS:
+        CompressorOn := TRUE;
+        RunTimer := T#0s; (* Reset runtime timer *)
+        StopTimer := T#0s; (* Reset stop timer *)
+        State := COMP_RUNS;
+
+    (* COMP_RUNS: Compressor is running and monitored for runtime conditions *)
+    COMP_RUNS:
+        CompressorOn := TRUE;
+        RunTimer := RunTimer + T#1s;
+
+        (* Transition conditions *)
+        IF Alarm THEN
+            State := COMP_OFF_BY_ALARM;
+        ELSIF RunTimer >= MinRunTime AND PumpdownTrigger THEN
+            State := PUMPDOWN;
+        ELSIF RunTimer >= MinRunTime AND NOT Enable THEN
+            State := COMP_OFF;
+        END_IF;
+
+    (* COMP_FORCED_OFF: Compressor is forced off due to external conditions like LPS/HPS *)
+    COMP_FORCED_OFF:
+        CompressorOn := FALSE;
+        StopTimer := StopTimer + T#1s;
+
+        (* Transition conditions *)
+        IF StopTimer >= MinStopTime AND Enable THEN
+            State := COMP_STARTS;
+        END_IF;
+
+    (* COMP_OFF_BY_ALARM: Compressor is off due to an active alarm condition *)
+    COMP_OFF_BY_ALARM:
+        CompressorOn := FALSE;
+        IF NOT Alarm THEN
+            State := COMP_OFF;
+        END_IF;
+
+    (* COMP_OFF_BY_SAFETY_TIMER: Compressor is off due to safety timer logic *)
+    COMP_OFF_BY_SAFETY_TIMER:
+        CompressorOn := FALSE;
+        SafetyTimerCounter := SafetyTimerCounter + T#1s;
+        IF SafetyTimerCounter >= SafetyTimer THEN
+            State := COMP_ON_BY_SAFETY_TIMER;
+        END_IF;
+
+    (* COMP_ON_BY_SAFETY_TIMER: Compressor is turned on by safety timer logic *)
+    COMP_ON_BY_SAFETY_TIMER:
+        CompressorOn := TRUE;
+        SafetyTimerCounter := T#0s;
+        State := COMP_RUNS;
+
+    (* MANUAL_MODE: Compressor operation is fully controlled manually *)
+    MANUAL_MODE:
+        CompressorOn := TRUE;
+        IF NOT ManualMode THEN
+            State := COMP_OFF;
+        END_IF;
+
+    (* PUMPDOWN: Compressor performs pumpdown logic *)
+    PUMPDOWN:
+        CompressorOn := TRUE;
+        (* Add pumpdown-specific logic here, such as monitoring LLSV or LPS conditions *)
+        IF NOT PumpdownTrigger THEN
+            State := COMP_OFF;
+        END_IF;
+
+END_CASE;
+
+END_FUNCTION_BLOCK
